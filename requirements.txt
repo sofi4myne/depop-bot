@@ -1,2 +1,6 @@
 python-telegram-bot==20.7
-beautifulsoup4==4.12.3
+pyzbar
+Pillow
+pdf2image
+requests
+beautifulsoup4
