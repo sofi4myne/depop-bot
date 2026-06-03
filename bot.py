@@ -9,6 +9,7 @@ import asyncio
 import imaplib
 import email
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -37,13 +38,17 @@ from telegram.ext import (
 )
 
 # ---------------------------------------------------------------------------
-# CONFIG — fill these in before running
+# CONFIG — values are read from environment variables (set in Railway)
 # ---------------------------------------------------------------------------
-TELEGRAM_BOT_TOKEN = "8795006744:AAGoRpnKT2qEI5tVMKHxFj9MaenzvcyjUHM"
-TELEGRAM_CHAT_ID   = 6821254642
+TELEGRAM_BOT_TOKEN   = os.environ.get("8795006744:AAGoRpnKT2qEI5tVMKHxFj9MaenzvcyjUHM")
+TELEGRAM_CHAT_ID     = int(os.environ.get("6821254642", 0))
 
-GMAIL_ADDRESS      = "cut0ffy0urh4nds@gmail.com"
-GMAIL_APP_PASSWORD = "ekyk zsfp wyqu ivfe"
+GMAIL_ADDRESS        = os.environ.get("cut0ffy0urh4nds@gmail.com")
+GMAIL_APP_PASSWORD   = os.environ.get("eekyk zsfp wyqu ivfe")
+
+# Second email is optional — leave blank in Railway if not needed
+GMAIL_ADDRESS_2      = os.environ.get("bingusboop@gmail.com")
+GMAIL_APP_PASSWORD_2 = os.environ.get("musk vccc djrv dqqh")
 
 EMAIL_CHECK_INTERVAL = 60
 # ---------------------------------------------------------------------------
@@ -158,15 +163,15 @@ def decode_subject(raw: str) -> str:
     return "".join(out)
 
 
-def fetch_new_sales(bot: Bot) -> None:
+def fetch_new_sales(bot: Bot, gmail_address: str, gmail_app_password: str) -> None:
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+        mail.login(gmail_address, gmail_app_password)
         mail.select("inbox")
 
         status, data = mail.search(
             None,
-            '(UNSEEN FROM "sold@alerts.depop.com" SUBJECT "You\'ve made a sale!")',
+            '(UNSEEN SUBJECT "Your USPS shipping label and sale confirmation for")',
         )
         if status != "OK":
             logger.warning("IMAP search failed: %s", status)
@@ -175,11 +180,11 @@ def fetch_new_sales(bot: Bot) -> None:
 
         email_ids = data[0].split()
         if not email_ids:
-            logger.info("No new sale emails.")
+            logger.info("No new sale emails for %s.", gmail_address)
             mail.logout()
             return
 
-        logger.info("Found %d new sale email(s).", len(email_ids))
+        logger.info("Found %d new sale email(s) for %s.", len(email_ids), gmail_address)
 
         for eid in email_ids:
             _, msg_data = mail.fetch(eid, "(RFC822)")
@@ -216,9 +221,9 @@ def fetch_new_sales(bot: Bot) -> None:
         mail.logout()
 
     except imaplib.IMAP4.error as exc:
-        logger.error("IMAP error: %s", exc)
+        logger.error("IMAP error for %s: %s", gmail_address, exc)
     except Exception as exc:
-        logger.exception("Unexpected error: %s", exc)
+        logger.exception("Unexpected error for %s: %s", gmail_address, exc)
 
 
 def _esc(text: str) -> str:
@@ -228,7 +233,11 @@ def _esc(text: str) -> str:
 def email_polling_loop(bot: Bot) -> None:
     logger.info("Email polling started (every %ds).", EMAIL_CHECK_INTERVAL)
     while True:
-        fetch_new_sales(bot)
+        # Always check the first email
+        fetch_new_sales(bot, GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+        # Check second email only if it's configured
+        if GMAIL_ADDRESS_2 and GMAIL_APP_PASSWORD_2:
+            fetch_new_sales(bot, GMAIL_ADDRESS_2, GMAIL_APP_PASSWORD_2)
         time.sleep(EMAIL_CHECK_INTERVAL)
 
 
@@ -320,7 +329,6 @@ async def show_shipped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode=ParseMode.HTML,
         reply_markup=make_menu(),
     )
-
 
 
 async def callback_mark_shipped(
