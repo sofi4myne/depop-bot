@@ -48,7 +48,7 @@ GMAIL_APP_PASSWORD   = os.environ.get("eekyk zsfp wyqu ivfe")
 
 # Second email is optional — leave blank in Railway if not needed
 GMAIL_ADDRESS_2      = os.environ.get("bingusboop@gmail.com")
-GMAIL_APP_PASSWORD_2 = os.environ.get("musk vccc djrv dqqh")
+GMAIL_APP_PASSWORD_2 = os.environ.get("iusk vccc djrv dqqh")
 
 EMAIL_CHECK_INTERVAL = 60
 # ---------------------------------------------------------------------------
