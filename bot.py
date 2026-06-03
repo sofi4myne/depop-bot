@@ -40,8 +40,8 @@ from telegram.ext import (
 # ---------------------------------------------------------------------------
 # CONFIG — values are read from environment variables (set in Railway)
 # ---------------------------------------------------------------------------
-TELEGRAM_BOT_TOKEN   = os.environ.get("8795006744:AAGoRpnKT2qEI5tVMKHxFj9MaenzvcyjUHM")
-TELEGRAM_CHAT_ID     = int(os.environ.get("6821254642", 0))
+TELEGRAM_BOT_TOKEN   = "8795006744:AAGPD0YkwckE7hNrtF13ZdlzUFwCybOUnTs"
+TELEGRAM_CHAT_ID     = 6821254642
 
 GMAIL_ADDRESS        = os.environ.get("cut0ffy0urh4nds@gmail.com")
 GMAIL_APP_PASSWORD   = os.environ.get("eekyk zsfp wyqu ivfe")
