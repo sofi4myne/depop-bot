@@ -25,7 +25,7 @@ import time
 import requests
 from PIL import Image
 from pdf2image import convert_from_bytes
-from pyzbar.pyzbar import decode as zbar_decode
+import zxingcpp
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -169,14 +169,12 @@ def db_get_by_id(pkg_id: int):
 # ===========================================================================
 
 def scan_barcode_from_image(image: Image.Image) -> str | None:
-    """Try to decode a barcode from a PIL Image. Returns tracking number or None."""
-    # Try original size first
-    results = zbar_decode(image)
-    if results:
-        for r in results:
-            val = r.data.decode("utf-8").strip()
-            if is_usps_tracking(val):
-                return val
+    results = zxingcpp.read_barcodes(image)
+    for r in results:
+        val = r.text.strip()
+        if is_usps_tracking(val):
+            return val
+    return None
 
     # Try resized larger for small/dense barcodes
     w, h = image.size
