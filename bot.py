@@ -25,7 +25,7 @@ import time
 import requests
 from PIL import Image
 from pdf2image import convert_from_bytes
-from pyzbar.pyzbar import decode as zbar_decode
+import pytesseract
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -169,74 +169,23 @@ def db_get_by_id(pkg_id: int):
 # ===========================================================================
 
 def scan_barcode_from_image(image: Image.Image) -> str | None:
-    # Try original
-    results = zbar_decode(image)
-    if results:
-        for r in results:
-            val = r.data.decode("utf-8").strip()
-            if is_usps_tracking(val):
-                return val
-
-    # Try resized 3x
-    w, h = image.size
-    large = image.resize((w * 3, h * 3), Image.LANCZOS)
-    results = zbar_decode(large)
-    if results:
-        for r in results:
-            val = r.data.decode("utf-8").strip()
-            if is_usps_tracking(val):
-                return val
-
-    # Try cropping bottom half where barcode usually lives
-    bottom = image.crop((0, h // 2, w, h))
-    results = zbar_decode(bottom)
-    if results:
-        for r in results:
-            val = r.data.decode("utf-8").strip()
-            if is_usps_tracking(val):
-                return val
-
-    # Try grayscale
-    gray = image.convert("L")
-    results = zbar_decode(gray)
-    if results:
-        for r in results:
-            val = r.data.decode("utf-8").strip()
-            if is_usps_tracking(val):
-                return val
-
-    return None
-
-    # Try resized larger for small/dense barcodes
-    w, h = image.size
-    large = image.resize((w * 2, h * 2), Image.LANCZOS)
-    results = zbar_decode(large)
-    if results:
-        for r in results:
-            val = r.data.decode("utf-8").strip()
-            if is_usps_tracking(val):
-                return val
-
-    # Try grayscale
-    gray = image.convert("L")
-    results = zbar_decode(gray)
-    if results:
-        for r in results:
-            val = r.data.decode("utf-8").strip()
-            if is_usps_tracking(val):
-                return val
-
+    """Extract USPS tracking number from image using OCR."""
+    try:
+        text = pytesseract.image_to_string(image)
+        # Look for sequences of digits with spaces that match tracking number format
+        matches = re.findall(r'\d[\d\s]{18,25}\d', text)
+        for match in matches:
+            clean = re.sub(r"\s", "", match)
+            if is_usps_tracking(clean):
+                return clean
+    except Exception as exc:
+        logger.error("OCR error: %s", exc)
     return None
 
 
 def is_usps_tracking(value: str) -> bool:
-    """USPS tracking numbers are 20-22 digits, or start with known prefixes."""
     clean = re.sub(r"\s", "", value)
-    if re.match(r"^\d{20,22}$", clean):
-        return True
-    if re.match(r"^(9[2345]\d{18,20}|82\d{8})$", clean):
-        return True
-    return False
+    return bool(re.match(r"^\d{20,22}$", clean))
 
 
 def extract_tracking_from_file(file_bytes: bytes, is_pdf: bool) -> str | None:

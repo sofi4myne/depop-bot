@@ -1,5 +1,5 @@
 python-telegram-bot==20.7
-pyzbar
+pytesseract
 Pillow
 pdf2image
 requests
