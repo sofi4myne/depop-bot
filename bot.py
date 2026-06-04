@@ -25,7 +25,7 @@ import time
 import requests
 from PIL import Image
 from pdf2image import convert_from_bytes
-import zxingcpp
+from pyzbar.pyzbar import decode as zbar_decode
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
