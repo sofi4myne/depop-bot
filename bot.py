@@ -358,11 +358,17 @@ def tracking_loop(bot) -> None:
 async def cmd_start(update, context) -> None:
     await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text(
-        "📦 <b>Depop Shipping Tracker</b>\n\n"
-        "Send me a shipping label (PNG or PDF) and I'll scan it, "
-        "track it automatically, and hit you when USPS picks it up "
-        "and when it's delivered 🔔\n\n"
-        "Use the buttons below to view your packages by account:",
+        "⚡️ <b>Rich Off Slips v.0.2</b> ⚡️\n\n"
+        "📦 <b>Supported carriers:</b>\n"
+        "  • USPS  — Active\n"
+        "  • FedEx — Active\n"
+        "  • UPS   — Active\n\n"
+        "💼 <b>Services:</b>\n"
+        "  • Send a PNG, JPG, or PDF shipping label to the bot\n"
+        "  • It scans and extracts the tracking number\n"
+        "  • First USPS scan → <i>Aye USPS scanned yo package 🔔</i>\n"
+        "  • Delivered → <i>IT'S THERE GANG 📦🔥</i> + Remove button\n\n"
+        "📎 <b>Accepted formats:</b> PNG, JPG, PDF",
         parse_mode=ParseMode.HTML,
         reply_markup=make_menu(),
     )
