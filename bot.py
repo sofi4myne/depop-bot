@@ -169,11 +169,42 @@ def db_get_by_id(pkg_id: int):
 # ===========================================================================
 
 def scan_barcode_from_image(image: Image.Image) -> str | None:
-    results = zxingcpp.read_barcodes(image)
-    for r in results:
-        val = r.text.strip()
-        if is_usps_tracking(val):
-            return val
+    # Try original
+    results = zbar_decode(image)
+    if results:
+        for r in results:
+            val = r.data.decode("utf-8").strip()
+            if is_usps_tracking(val):
+                return val
+
+    # Try resized 3x
+    w, h = image.size
+    large = image.resize((w * 3, h * 3), Image.LANCZOS)
+    results = zbar_decode(large)
+    if results:
+        for r in results:
+            val = r.data.decode("utf-8").strip()
+            if is_usps_tracking(val):
+                return val
+
+    # Try cropping bottom half where barcode usually lives
+    bottom = image.crop((0, h // 2, w, h))
+    results = zbar_decode(bottom)
+    if results:
+        for r in results:
+            val = r.data.decode("utf-8").strip()
+            if is_usps_tracking(val):
+                return val
+
+    # Try grayscale
+    gray = image.convert("L")
+    results = zbar_decode(gray)
+    if results:
+        for r in results:
+            val = r.data.decode("utf-8").strip()
+            if is_usps_tracking(val):
+                return val
+
     return None
 
     # Try resized larger for small/dense barcodes
@@ -212,7 +243,7 @@ def extract_tracking_from_file(file_bytes: bytes, is_pdf: bool) -> str | None:
     """Extract tracking number from PNG/JPG or PDF bytes."""
     try:
         if is_pdf:
-            pages = convert_from_bytes(file_bytes, dpi=200)
+            pages = convert_from_bytes(file_bytes, dpi=400)
             for page in pages:
                 result = scan_barcode_from_image(page)
                 if result:
