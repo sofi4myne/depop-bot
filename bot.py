@@ -30,9 +30,6 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     Update,
 )
 from telegram.constants import ParseMode
@@ -62,23 +59,16 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = "tracker.db"
 
-BTN_GRANNY  = "granny"
-BTN_VELI0R  = "veli0r"
 BTN_GRANNY_LIST = "📦 granny's packages"
 BTN_VELI0R_LIST = "📦 veli0r's packages"
 
 
-def make_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(BTN_GRANNY_LIST)],
-            [KeyboardButton(BTN_VELI0R_LIST)],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False,
-        is_persistent=True,
-        input_field_placeholder="Send a label or pick a list...",
-    )
+def make_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 granny's packages", callback_data="menu:granny"),
+         InlineKeyboardButton("📦 veli0r's packages", callback_data="menu:veli0r")],
+        [InlineKeyboardButton("Send Slip 🧾", callback_data="menu:sendslip")],
+    ])
 
 
 # ===========================================================================
@@ -387,7 +377,6 @@ def tracking_loop(bot) -> None:
 async def cmd_start(update, context) -> None:
     total = db_get_total_funds()
     total_str = f"${total:,.2f}".rstrip('0').rstrip('.')
-    await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text(
         "⚡️ <b>Rich Off Slips v.0.2</b> ⚡️\n\n"
         f"💵 <b>Stock: {total_str}</b>\n\n"
@@ -407,8 +396,14 @@ async def cmd_start(update, context) -> None:
 
 
 async def cmd_menu(update, context) -> None:
-    await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
-    await update.message.reply_text("Here's ya menu:", reply_markup=make_menu())
+    total = db_get_total_funds()
+    total_str = f"${total:,.2f}".rstrip('0').rstrip('.')
+    await update.message.reply_text(
+        "⚡️ <b>Rich Off Slips v.0.2</b> ⚡️\n\n"
+        f"💵 <b>Stock: {total_str}</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=make_menu(),
+    )
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -471,7 +466,6 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Handle sale amount input
     if context.user_data.get("awaiting_amount"):
         amount = text.strip().replace("$", "").replace(",", "")
-        # Validate it looks like a number
         try:
             float(amount)
         except ValueError:
@@ -484,11 +478,9 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["awaiting_amount"] = False
 
         tracking = context.user_data.get("pending_tracking")
-        recipient = context.user_data.get("pending_recipient", "")
 
         await update.message.reply_text(
-            f"💰 <b>${amount}</b> locked in!\n\n"
-            f"Which account?",
+            f"💰 <b>${amount}</b> locked in!\n\nWhich account?",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("granny", callback_data=f"save:granny:{tracking}"),
@@ -497,22 +489,19 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    if text == BTN_GRANNY_LIST:
-        await show_packages(update, context, "granny")
-    elif text == BTN_VELI0R_LIST:
-        await show_packages(update, context, "veli0r")
-    else:
-        await update.message.reply_text(
-            "Send me a shipping label (PNG or PDF) to track it 📦",
-            reply_markup=make_menu(),
-        )
+    # Anything else — remind them to send a label
+    await update.message.reply_text(
+        "Send me a shipping label (PNG or PDF) to track it 📦",
+        reply_markup=make_menu(),
+    )
 
 
-async def show_packages(update: Update, context, category: str) -> None:
+async def show_packages_inline(query, context, category: str) -> None:
     rows = db_get_active(category)
     if not rows:
-        await update.message.reply_text(
-            f"No active packages under <b>{category}</b> rn 👀",
+        await query.edit_message_text(
+            f"No active packages under <b>{category}</b> rn 👀\n\n"
+            "Send me a label to add one!",
             parse_mode=ParseMode.HTML,
             reply_markup=make_menu(),
         )
@@ -534,17 +523,53 @@ async def show_packages(update: Update, context, category: str) -> None:
             InlineKeyboardButton("Remove from list 🗑️", callback_data=f"remove:{pkg_id}"),
         ])
 
-    await update.message.reply_text(
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:back")])
+
+    await query.edit_message_text(
         f"📦 <b>{category}'s packages ({len(rows)}):</b>\n\n" + "\n\n".join(lines),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    # ── Menu buttons ──────────────────────────────────────────────────────
+    if data.startswith("menu:"):
+        category = data.split(":")[1]
+        if category == "back":
+            total = db_get_total_funds()
+            total_str = f"${total:,.2f}".rstrip('0').rstrip('.')
+            await query.edit_message_text(
+                "⚡️ <b>Rich Off Slips v.0.2</b> ⚡️\n\n"
+                f"💵 <b>Stock: {total_str}</b>\n\n"
+                "📦 <b>Supported carriers:</b>\n"
+                "  • USPS  — Active\n"
+                "  • FedEx — Active\n"
+                "  • UPS   — Active\n\n"
+                "💼 <b>Services:</b>\n"
+                "  • Send a PNG, JPG, or PDF shipping label to the bot\n"
+                "  • It scans and extracts the tracking number\n"
+                "  • First USPS scan → <i>Aye USPS scanned yo package 🔔</i>\n"
+                "  • Delivered → <i>IT'S THERE GANG 📦🔥</i> + Remove button\n\n"
+                "📎 <b>Accepted formats:</b> PNG, JPG, PDF",
+                parse_mode=ParseMode.HTML,
+                reply_markup=make_menu(),
+            )
+        elif category == "sendslip":
+            await query.edit_message_text(
+                "📎 Send your shipping label now gang!\n\n"
+                "Drop the PNG, JPG, or PDF and I'll scan it 👀",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await show_packages_inline(query, context, category)
+        return
 
     # ── Save package to a category ────────────────────────────────────────
     if data.startswith("save:"):
