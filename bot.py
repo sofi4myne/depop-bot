@@ -25,7 +25,7 @@ import time
 import requests
 from PIL import Image
 from pdf2image import convert_from_bytes
-import pytesseract
+from pyzbar.pyzbar import decode as zbar_decode
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -169,30 +169,52 @@ def db_get_by_id(pkg_id: int):
 # ===========================================================================
 
 def scan_barcode_from_image(image: Image.Image) -> str | None:
-    """Extract USPS tracking number from image using OCR."""
-    try:
-        text = pytesseract.image_to_string(image)
-        # Look for sequences of digits with spaces that match tracking number format
-        matches = re.findall(r'\d[\d\s]{18,25}\d', text)
-        for match in matches:
-            clean = re.sub(r"\s", "", match)
-            if is_usps_tracking(clean):
-                return clean
-    except Exception as exc:
-        logger.error("OCR error: %s", exc)
+    """Try to decode a barcode from a PIL Image. Returns tracking number or None."""
+    # Try original size first
+    results = zbar_decode(image)
+    if results:
+        for r in results:
+            val = r.data.decode("utf-8").strip()
+            if is_usps_tracking(val):
+                return val
+
+    # Try resized larger for small/dense barcodes
+    w, h = image.size
+    large = image.resize((w * 2, h * 2), Image.LANCZOS)
+    results = zbar_decode(large)
+    if results:
+        for r in results:
+            val = r.data.decode("utf-8").strip()
+            if is_usps_tracking(val):
+                return val
+
+    # Try grayscale
+    gray = image.convert("L")
+    results = zbar_decode(gray)
+    if results:
+        for r in results:
+            val = r.data.decode("utf-8").strip()
+            if is_usps_tracking(val):
+                return val
+
     return None
 
 
 def is_usps_tracking(value: str) -> bool:
+    """USPS tracking numbers are 20-22 digits, or start with known prefixes."""
     clean = re.sub(r"\s", "", value)
-    return bool(re.match(r"^\d{20,22}$", clean))
+    if re.match(r"^\d{20,22}$", clean):
+        return True
+    if re.match(r"^(9[2345]\d{18,20}|82\d{8})$", clean):
+        return True
+    return False
 
 
 def extract_tracking_from_file(file_bytes: bytes, is_pdf: bool) -> str | None:
     """Extract tracking number from PNG/JPG or PDF bytes."""
     try:
         if is_pdf:
-            pages = convert_from_bytes(file_bytes, dpi=400)
+            pages = convert_from_bytes(file_bytes, dpi=200)
             for page in pages:
                 result = scan_barcode_from_image(page)
                 if result:
@@ -327,12 +349,12 @@ def tracking_loop(bot) -> None:
 # ===========================================================================
 
 async def cmd_start(update, context) -> None:
-    await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
-    await update.message.reply_text(
+    msg = await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
+    await msg.edit_text(
         "📦 <b>Depop Shipping Tracker</b>\n\n"
-        "Send me a shipping label (PNG or PDF) and I'll scan the barcode, "
-        "track it automatically, and let you know when USPS picks it up and "
-        "when it's delivered 🔔\n\n"
+        "Send me a shipping label (PNG or PDF) and I'll scan it, "
+        "track it automatically, and hit you when USPS picks it up "
+        "and when it's delivered 🔔\n\n"
         "Use the buttons below to view your packages by account:",
         parse_mode=ParseMode.HTML,
         reply_markup=make_menu(),
@@ -340,20 +362,18 @@ async def cmd_start(update, context) -> None:
 
 
 async def cmd_menu(update, context) -> None:
-    await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
-    await update.message.reply_text("Here's ya menu:", reply_markup=make_menu())
+    msg = await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
+    await msg.edit_text("Here's ya menu:", reply_markup=make_menu())
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle photo messages — treat as shipping label."""
-    await update.message.reply_text("Hold up lemme scan this real quick 👀")
-
-    photo = update.message.photo[-1]  # highest resolution
+    msg = await update.message.reply_text("Hold up lemme scan this real quick 👀")
+    photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     file_bytes = await file.download_as_bytearray()
-
     tracking = extract_tracking_from_file(bytes(file_bytes), is_pdf=False)
-    await _after_scan(update, context, tracking)
+    await _after_scan(msg, context, tracking)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -368,31 +388,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    await update.message.reply_text("Hold up lemme scan this real quick 👀")
-
+    msg = await update.message.reply_text("Hold up lemme scan this real quick 👀")
     file = await context.bot.get_file(doc.file_id)
     file_bytes = await file.download_as_bytearray()
-
     is_pdf = "pdf" in mime
     tracking = extract_tracking_from_file(bytes(file_bytes), is_pdf=is_pdf)
-    await _after_scan(update, context, tracking)
+    await _after_scan(msg, context, tracking)
 
 
-async def _after_scan(update: Update, context, tracking: str | None) -> None:
-    """Called after barcode scan attempt — ask for category or report failure."""
+async def _after_scan(msg, context, tracking: str | None) -> None:
+    """Edit the scanning message with the result — stays in same bubble."""
     if not tracking:
-        await update.message.reply_text(
+        await msg.edit_text(
             "That label tweakin, try again 😂\n\n"
-            "Make sure the barcode is clear and not cut off. "
-            "Try sending it as a file instead of a photo if it keeps failing.",
-            reply_markup=make_menu(),
+            "Make sure the label is clear and not cut off.",
         )
         return
 
-    # Store tracking number temporarily in context for next step
-    context.user_data["pending_tracking"] = tracking
-
-    await update.message.reply_text(
+    await msg.edit_text(
         f"Found dat ho ✅\n\n"
         f"<b>Tracking:</b> <code>{tracking}</code>\n\n"
         "Which account?",
@@ -427,22 +440,22 @@ async def show_packages(update: Update, context, category: str) -> None:
         )
         return
 
-    await update.message.reply_text(
-        f"📦 <b>{category}'s packages ({len(rows)}):</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=make_menu(),
-    )
-
+    # Build all packages into one single message
+    lines = []
+    buttons = []
     for pkg_id, tracking, status, last_event in rows:
         display_status = last_event if last_event else status
-        await update.message.reply_text(
-            f"<code>{tracking}</code>\n📍 {_esc(display_status)}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("Where dat pack? 🗺️", callback_data=f"track:{pkg_id}"),
-                InlineKeyboardButton("Remove from list 🗑️", callback_data=f"remove:{pkg_id}"),
-            ]]),
-        )
+        lines.append(f"<code>{tracking}</code>\n📍 {_esc(display_status)}")
+        buttons.append([
+            InlineKeyboardButton("Where dat pack? 🗺️", callback_data=f"track:{pkg_id}"),
+            InlineKeyboardButton("Remove from list 🗑️", callback_data=f"remove:{pkg_id}"),
+        ])
+
+    await update.message.reply_text(
+        f"📦 <b>{category}'s packages ({len(rows)}):</b>\n\n" + "\n\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
