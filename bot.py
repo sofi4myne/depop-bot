@@ -356,8 +356,8 @@ def tracking_loop(bot) -> None:
 # ===========================================================================
 
 async def cmd_start(update, context) -> None:
-    msg = await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
-    await msg.edit_text(
+    await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
         "📦 <b>Depop Shipping Tracker</b>\n\n"
         "Send me a shipping label (PNG or PDF) and I'll scan it, "
         "track it automatically, and hit you when USPS picks it up "
@@ -369,8 +369,8 @@ async def cmd_start(update, context) -> None:
 
 
 async def cmd_menu(update, context) -> None:
-    msg = await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
-    await msg.edit_text("Here's ya menu:", reply_markup=make_menu())
+    await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("Here's ya menu:", reply_markup=make_menu())
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
