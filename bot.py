@@ -92,6 +92,8 @@ def db_init() -> None:
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 tracking_number TEXT    NOT NULL UNIQUE,
                 category        TEXT    NOT NULL,
+                recipient       TEXT    NOT NULL DEFAULT '',
+                amount          TEXT    NOT NULL DEFAULT '',
                 status          TEXT    NOT NULL DEFAULT 'pending',
                 last_event      TEXT    NOT NULL DEFAULT '',
                 usps_scanned    INTEGER NOT NULL DEFAULT 0,
@@ -102,13 +104,13 @@ def db_init() -> None:
     logger.info("Database ready: %s", DB_PATH)
 
 
-def db_add_package(tracking: str, category: str) -> bool:
+def db_add_package(tracking: str, category: str, recipient: str = "", amount: str = "") -> bool:
     """Returns True if inserted, False if tracking number already exists."""
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
-                "INSERT INTO packages (tracking_number, category) VALUES (?, ?)",
-                (tracking, category),
+                "INSERT INTO packages (tracking_number, category, recipient, amount) VALUES (?, ?, ?, ?)",
+                (tracking, category, recipient, amount),
             )
             conn.commit()
         return True
@@ -120,12 +122,12 @@ def db_get_active(category: str = None):
     with sqlite3.connect(DB_PATH) as conn:
         if category:
             return conn.execute(
-                "SELECT id, tracking_number, status, last_event FROM packages "
+                "SELECT id, tracking_number, status, last_event, recipient, amount FROM packages "
                 "WHERE delivered = 0 AND category = ? ORDER BY id DESC",
                 (category,),
             ).fetchall()
         return conn.execute(
-            "SELECT id, tracking_number, category, status, last_event "
+            "SELECT id, tracking_number, category, status, last_event, recipient, amount "
             "FROM packages WHERE delivered = 0 ORDER BY id DESC"
         ).fetchall()
 
@@ -168,63 +170,68 @@ def db_get_by_id(pkg_id: int):
 # BARCODE SCANNING
 # ===========================================================================
 
-def scan_barcode_from_image(image: Image.Image) -> str | None:
-    """Try to decode a barcode from a PIL Image. Returns tracking number or None."""
-    # Try original size first
-    results = zbar_decode(image)
-    if results:
-        for r in results:
-            val = r.data.decode("utf-8").strip()
-            if is_usps_tracking(val):
-                return val
+def is_usps_tracking(value: str) -> bool:
+    clean = re.sub(r"\s", "", value)
+    return bool(re.match(r"^\d{20,22}$", clean))
 
-    # Try resized larger for small/dense barcodes
-    w, h = image.size
-    large = image.resize((w * 2, h * 2), Image.LANCZOS)
-    results = zbar_decode(large)
-    if results:
-        for r in results:
-            val = r.data.decode("utf-8").strip()
-            if is_usps_tracking(val):
-                return val
 
-    # Try grayscale
-    gray = image.convert("L")
-    results = zbar_decode(gray)
-    if results:
-        for r in results:
-            val = r.data.decode("utf-8").strip()
-            if is_usps_tracking(val):
-                return val
-
+def extract_recipient_name(text: str) -> str | None:
+    """
+    Pull the recipient name from OCR text.
+    Labels have: sender name/address block, then recipient name/address block.
+    We skip the first all-caps name (sender) and return the second one.
+    """
+    skip_words = {"USPS", "GROUND", "ADVANTAGE", "CUBIC", "TRACKING",
+                  "SHIP", "RDC", "PAID", "POSTAGE", "DATE", "WEIGHT"}
+    caps_names = []
+    for line in text.split("\n"):
+        # Strip garbled OCR prefix chars (e.g. "aegea HUMZA" → "HUMZA")
+        clean = re.sub(r'^[^A-Z]+', '', line.strip()).strip()
+        if (re.match(r'^[A-Z][A-Z\s]{3,}$', clean)
+                and not any(w in clean for w in skip_words)
+                and len(clean.split()) >= 2):
+            caps_names.append(clean.title())
+    # Index 0 = sender, index 1 = recipient
+    if len(caps_names) >= 2:
+        return caps_names[1]
+    elif len(caps_names) == 1:
+        return caps_names[0]
     return None
 
 
-def is_usps_tracking(value: str) -> bool:
-    """USPS tracking numbers are 20-22 digits, or start with known prefixes."""
-    clean = re.sub(r"\s", "", value)
-    if re.match(r"^\d{20,22}$", clean):
-        return True
-    if re.match(r"^(9[2345]\d{18,20}|82\d{8})$", clean):
-        return True
-    return False
+def scan_label_image(image) -> tuple:
+    """OCR the image and return (tracking_number, recipient_name)."""
+    try:
+        text = pytesseract.image_to_string(image)
+        # Find tracking number
+        tracking = None
+        for match in re.findall(r'\d[\d\s]{18,25}\d', text):
+            clean = re.sub(r"\s", "", match)
+            if is_usps_tracking(clean):
+                tracking = clean
+                break
+        name = extract_recipient_name(text)
+        return tracking, name
+    except Exception as exc:
+        logger.error("OCR error: %s", exc)
+        return None, None
 
 
-def extract_tracking_from_file(file_bytes: bytes, is_pdf: bool) -> str | None:
-    """Extract tracking number from PNG/JPG or PDF bytes."""
+def extract_tracking_from_file(file_bytes: bytes, is_pdf: bool) -> tuple:
+    """Extract (tracking_number, recipient_name) from PNG/JPG or PDF bytes."""
     try:
         if is_pdf:
-            pages = convert_from_bytes(file_bytes, dpi=200)
+            pages = convert_from_bytes(file_bytes, dpi=400)
             for page in pages:
-                result = scan_barcode_from_image(page)
-                if result:
-                    return result
+                tracking, name = scan_label_image(page)
+                if tracking:
+                    return tracking, name
         else:
             image = Image.open(io.BytesIO(file_bytes))
-            return scan_barcode_from_image(image)
+            return scan_label_image(image)
     except Exception as exc:
-        logger.exception("Error scanning barcode: %s", exc)
-    return None
+        logger.exception("Error scanning label: %s", exc)
+    return None, None
 
 
 # ===========================================================================
@@ -372,8 +379,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     file_bytes = await file.download_as_bytearray()
-    tracking = extract_tracking_from_file(bytes(file_bytes), is_pdf=False)
-    await _after_scan(msg, context, tracking)
+    tracking, recipient = extract_tracking_from_file(bytes(file_bytes), is_pdf=False)
+    await _after_scan(msg, context, tracking, recipient)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -392,11 +399,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     file = await context.bot.get_file(doc.file_id)
     file_bytes = await file.download_as_bytearray()
     is_pdf = "pdf" in mime
-    tracking = extract_tracking_from_file(bytes(file_bytes), is_pdf=is_pdf)
-    await _after_scan(msg, context, tracking)
+    tracking, recipient = extract_tracking_from_file(bytes(file_bytes), is_pdf=is_pdf)
+    await _after_scan(msg, context, tracking, recipient)
 
 
-async def _after_scan(msg, context, tracking: str | None) -> None:
+async def _after_scan(msg, context, tracking: str | None, recipient: str | None) -> None:
     """Edit the scanning message with the result — stays in same bubble."""
     if not tracking:
         await msg.edit_text(
@@ -405,20 +412,53 @@ async def _after_scan(msg, context, tracking: str | None) -> None:
         )
         return
 
+    # Store in context for the next steps
+    context.user_data["pending_tracking"] = tracking
+    context.user_data["pending_recipient"] = recipient or "Unknown"
+
+    name_line = f"\n<b>To:</b> {_esc(recipient)}" if recipient else ""
     await msg.edit_text(
         f"Found dat ho ✅\n\n"
-        f"<b>Tracking:</b> <code>{tracking}</code>\n\n"
-        "Which account?",
+        f"<b>Tracking:</b> <code>{tracking}</code>{name_line}\n\n"
+        f"How much u finna get? 💰\n"
+        f"<i>Reply with the amount (e.g. 25 or 25.99)</i>",
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("granny", callback_data=f"save:granny:{tracking}"),
-            InlineKeyboardButton("veli0r", callback_data=f"save:veli0r:{tracking}"),
-        ]]),
     )
+    context.user_data["awaiting_amount"] = True
 
 
 async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text
+
+    # Handle sale amount input
+    if context.user_data.get("awaiting_amount"):
+        amount = text.strip().replace("$", "").replace(",", "")
+        # Validate it looks like a number
+        try:
+            float(amount)
+        except ValueError:
+            await update.message.reply_text(
+                "Just send the amount as a number gang, like 25 or 25.99 💰"
+            )
+            return
+
+        context.user_data["pending_amount"] = amount
+        context.user_data["awaiting_amount"] = False
+
+        tracking = context.user_data.get("pending_tracking")
+        recipient = context.user_data.get("pending_recipient", "")
+
+        await update.message.reply_text(
+            f"💰 <b>${amount}</b> locked in!\n\n"
+            f"Which account?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("granny", callback_data=f"save:granny:{tracking}"),
+                InlineKeyboardButton("veli0r", callback_data=f"save:veli0r:{tracking}"),
+            ]]),
+        )
+        return
+
     if text == BTN_GRANNY_LIST:
         await show_packages(update, context, "granny")
     elif text == BTN_VELI0R_LIST:
@@ -440,12 +480,17 @@ async def show_packages(update: Update, context, category: str) -> None:
         )
         return
 
-    # Build all packages into one single message
     lines = []
     buttons = []
-    for pkg_id, tracking, status, last_event in rows:
+    for pkg_id, tracking, status, last_event, recipient, amount in rows:
         display_status = last_event if last_event else status
-        lines.append(f"<code>{tracking}</code>\n📍 {_esc(display_status)}")
+        line = f"<code>{tracking}</code>"
+        if recipient:
+            line += f"\n👤 {_esc(recipient)}"
+        if amount:
+            line += f"  💰 ${_esc(amount)}"
+        line += f"\n📍 {_esc(display_status)}"
+        lines.append(line)
         buttons.append([
             InlineKeyboardButton("Where dat pack? 🗺️", callback_data=f"track:{pkg_id}"),
             InlineKeyboardButton("Remove from list 🗑️", callback_data=f"remove:{pkg_id}"),
@@ -466,14 +511,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # ── Save package to a category ────────────────────────────────────────
     if data.startswith("save:"):
         _, category, tracking = data.split(":", 2)
-        added = db_add_package(tracking, category)
+        recipient = context.user_data.get("pending_recipient", "")
+        amount = context.user_data.get("pending_amount", "")
+        added = db_add_package(tracking, category, recipient, amount)
         if added:
+            recipient_line = f"\n👤 <b>To:</b> {_esc(recipient)}" if recipient else ""
+            amount_line = f"\n💰 <b>Sale:</b> ${_esc(amount)}" if amount else ""
             await query.edit_message_text(
-                f"✅ Saved under <b>{category}</b>!\n\n"
+                f"✅ Saved under <b>{category}</b>!{recipient_line}{amount_line}\n\n"
                 f"<b>Tracking:</b> <code>{tracking}</code>\n\n"
                 f"I'll hit you up when USPS scans it and when it's delivered 🔔",
                 parse_mode=ParseMode.HTML,
             )
+            # Clear context
+            context.user_data.pop("pending_tracking", None)
+            context.user_data.pop("pending_recipient", None)
+            context.user_data.pop("pending_amount", None)
         else:
             await query.edit_message_text(
                 f"That tracking number is already in your list gang 👀\n"
