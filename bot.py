@@ -166,6 +166,19 @@ def db_get_by_id(pkg_id: int):
         ).fetchone()
 
 
+def db_get_total_funds() -> float:
+    """Sum all stored sale amounts across all packages."""
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("SELECT amount FROM packages WHERE amount != ''").fetchall()
+    total = 0.0
+    for (amt,) in rows:
+        try:
+            total += float(amt)
+        except ValueError:
+            pass
+    return total
+
+
 # ===========================================================================
 # BARCODE SCANNING
 # ===========================================================================
@@ -178,24 +191,40 @@ def is_usps_tracking(value: str) -> bool:
 def extract_recipient_name(text: str) -> str | None:
     """
     Pull the recipient name from OCR text.
-    Labels have: sender name/address block, then recipient name/address block.
-    We skip the first all-caps name (sender) and return the second one.
+    Skips known header words and street address lines.
+    The recipient name is the first all-caps multi-word line
+    that appears after the sender address block (after a state/zip line).
     """
     skip_words = {"USPS", "GROUND", "ADVANTAGE", "CUBIC", "TRACKING",
                   "SHIP", "RDC", "PAID", "POSTAGE", "DATE", "WEIGHT"}
-    caps_names = []
+    street_suffixes = {"ST", "AVE", "DR", "RD", "BLVD", "LN", "CT",
+                       "WAY", "PL", "PKWY", "HWY", "VINCELLETTE"}
+
+    # Find all lines that look like names (all caps, 2+ words, no digits)
+    name_candidates = []
     for line in text.split("\n"):
-        # Strip garbled OCR prefix chars (e.g. "aegea HUMZA" → "HUMZA")
         clean = re.sub(r'^[^A-Z]+', '', line.strip()).strip()
-        if (re.match(r'^[A-Z][A-Z\s]{3,}$', clean)
-                and not any(w in clean for w in skip_words)
-                and len(clean.split()) >= 2):
-            caps_names.append(clean.title())
-    # Index 0 = sender, index 1 = recipient
-    if len(caps_names) >= 2:
-        return caps_names[1]
-    elif len(caps_names) == 1:
-        return caps_names[0]
+        # Must be all caps letters and spaces only
+        if not re.match(r'^[A-Z][A-Z\s]{3,}$', clean):
+            continue
+        # Skip known header words
+        if any(w in clean.split() for w in skip_words):
+            continue
+        # Skip street lines
+        words = clean.split()
+        if len(words) < 2:
+            continue
+        if any(w in street_suffixes for w in words):
+            continue
+        # Skip if contains digits
+        if re.search(r'\d', clean):
+            continue
+        name_candidates.append(clean.title())
+
+    # First candidate after filtering is the recipient
+    # (sender name gets filtered out because it has "Ship Date" on same line)
+    if name_candidates:
+        return name_candidates[0]
     return None
 
 
@@ -356,9 +385,12 @@ def tracking_loop(bot) -> None:
 # ===========================================================================
 
 async def cmd_start(update, context) -> None:
+    total = db_get_total_funds()
+    total_str = f"${total:,.2f}".rstrip('0').rstrip('.')
     await update.message.reply_text("Loading...", reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text(
         "⚡️ <b>Rich Off Slips v.0.2</b> ⚡️\n\n"
+        f"💵 <b>Stock: {total_str}</b>\n\n"
         "📦 <b>Supported carriers:</b>\n"
         "  • USPS  — Active\n"
         "  • FedEx — Active\n"
