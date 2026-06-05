@@ -254,73 +254,90 @@ def extract_tracking_from_file(file_bytes: bytes, is_pdf: bool) -> tuple:
 
 
 # ===========================================================================
-# USPS TRACKING (scraping — no API key needed)
+# TRACKING via 17track API
 # ===========================================================================
 
-USPS_TRACK_URL = "https://tools.usps.com/go/TrackConfirmAction"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
+TRACK17_API_KEY = "9F2C17805FF6991C84F390949A0F8B47"
+TRACK17_REGISTER_URL = "https://api.17track.net/track/v2.2/register"
+TRACK17_STATUS_URL   = "https://api.17track.net/track/v2.2/gettrackinfo"
 
 
 def get_tracking_status(tracking_number: str) -> dict:
     """
-    Scrape USPS tracking page and return:
+    Query 17track API and return:
     {
-        "status": str,       human-readable latest status
+        "status": str,
         "delivered": bool,
-        "usps_scanned": bool,  True once USPS has touched it
-        "raw": str            full latest event line
+        "usps_scanned": bool,
+        "raw": str
     }
     """
+    headers = {
+        "Content-Type": "application/json",
+        "17token": TRACK17_API_KEY,
+    }
+
+    # Step 1: Register the tracking number (needed first time)
     try:
-        resp = requests.get(
-            USPS_TRACK_URL,
-            params={"tLabels": tracking_number},
-            headers=HEADERS,
+        requests.post(
+            TRACK17_REGISTER_URL,
+            json=[{"number": tracking_number}],
+            headers=headers,
+            timeout=10,
+        )
+    except Exception as exc:
+        logger.warning("17track register error: %s", exc)
+
+    # Step 2: Get tracking info
+    try:
+        resp = requests.post(
+            TRACK17_STATUS_URL,
+            json=[{"number": tracking_number}],
+            headers=headers,
             timeout=15,
         )
-        html = resp.text
+        data = resp.json()
 
-        # Pull the primary status text
-        status_match = re.search(
-            r'class="tb-status[^"]*"[^>]*>\s*<p[^>]*>\s*([^<]+)',
-            html,
-        )
-        status = status_match.group(1).strip() if status_match else ""
+        # Navigate the response
+        accepted = data.get("data", {}).get("accepted", [])
+        if not accepted:
+            logger.warning("17track no accepted data for %s: %s", tracking_number, data)
+            return {"status": "No update yet", "delivered": False, "usps_scanned": False, "raw": "No update yet"}
 
-        # Pull latest event detail
-        event_match = re.search(
-            r'class="tb-step".*?<p[^>]*class="[^"]*tb-date[^"]*"[^>]*>([^<]+)',
-            html, re.DOTALL,
-        )
-        event = event_match.group(1).strip() if event_match else ""
+        track_info = accepted[0].get("track", {})
+        events = track_info.get("z1", [])  # z1 = tracking events array
 
-        delivered = bool(re.search(r"delivered", html, re.IGNORECASE) and
-                         re.search(r"class=\"tb-status", html))
-        usps_scanned = bool(status) and "pre-shipment" not in status.lower()
+        if not events:
+            return {"status": "No update yet", "delivered": False, "usps_scanned": False, "raw": "No update yet"}
 
+        # Latest event is first in the array
+        latest = events[0]
+        status = latest.get("z", "") or latest.get("c", "")
+        location = latest.get("l", "")
+        time_str = latest.get("a", "")
+        raw = f"{status}"
+        if location:
+            raw += f" — {location}"
+        if time_str:
+            raw += f" ({time_str[:10]})"
+
+        # Check delivery status
+        track_state = track_info.get("w1", {})
+        package_status = str(track_state.get("package_status", "")).lower()
+        delivered = "delivered" in package_status or "delivered" in status.lower()
+        usps_scanned = len(events) > 0 and "pre-shipment" not in status.lower() and status != ""
+
+        logger.info("17track status for %s: %s", tracking_number, raw)
         return {
-            "status": status or "No update yet",
+            "status": status or "In transit",
             "delivered": delivered,
             "usps_scanned": usps_scanned,
-            "raw": f"{status} — {event}".strip(" —"),
+            "raw": raw,
         }
 
     except Exception as exc:
-        logger.error("Tracking fetch error for %s: %s", tracking_number, exc)
-        return {
-            "status": "Could not fetch status",
-            "delivered": False,
-            "usps_scanned": False,
-            "raw": "Could not fetch status",
-        }
+        logger.error("17track error for %s: %s", tracking_number, exc)
+        return {"status": "Could not fetch status", "delivered": False, "usps_scanned": False, "raw": "Could not fetch status"}
 
 
 # ===========================================================================
