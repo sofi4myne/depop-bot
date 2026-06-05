@@ -254,88 +254,58 @@ def extract_tracking_from_file(file_bytes: bytes, is_pdf: bool) -> tuple:
 
 
 # ===========================================================================
-# TRACKING via 17track API
+# TRACKING via Shippo API
 # ===========================================================================
 
-TRACK17_API_KEY = "9F2C17805FF6991C84F390949A0F8B47"
-TRACK17_REGISTER_URL = "https://api.17track.net/track/v2.2/register"
-TRACK17_STATUS_URL   = "https://api.17track.net/track/v2.2/gettrackinfo"
+SHIPPO_API_KEY = os.environ.get("SHIPPO_API_KEY")
+SHIPPO_TRACK_URL = "https://api.goshippo.com/tracks"
 
 
 def get_tracking_status(tracking_number: str) -> dict:
-    """
-    Query 17track API and return:
-    {
-        "status": str,
-        "delivered": bool,
-        "usps_scanned": bool,
-        "raw": str
-    }
-    """
-    headers = {
-        "Content-Type": "application/json",
-        "17token": TRACK17_API_KEY,
-    }
-
-    # Step 1: Register the tracking number (needed first time)
+    """Query Shippo tracking API."""
     try:
-        requests.post(
-            TRACK17_REGISTER_URL,
-            json=[{"number": tracking_number}],
-            headers=headers,
-            timeout=10,
-        )
-    except Exception as exc:
-        logger.warning("17track register error: %s", exc)
-
-    # Step 2: Get tracking info
-    try:
-        resp = requests.post(
-            TRACK17_STATUS_URL,
-            json=[{"number": tracking_number}],
-            headers=headers,
+        resp = requests.get(
+            f"{SHIPPO_TRACK_URL}/usps/{tracking_number}",
+            headers={
+                "Authorization": f"ShippoToken {SHIPPO_API_KEY}",
+                "Content-Type": "application/json",
+            },
             timeout=15,
         )
         data = resp.json()
-        logger.info("17track raw response for %s: %s", tracking_number, data)
-        accepted = data.get("data", {}).get("accepted", [])
-        if not accepted:
-            logger.warning("17track no accepted data for %s: %s", tracking_number, data)
-            return {"status": "No update yet", "delivered": False, "usps_scanned": False, "raw": "No update yet"}
+        logger.info("Shippo response for %s: %s", tracking_number, data)
 
-        track_info = accepted[0].get("track", {})
-        events = track_info.get("z1", [])  # z1 = tracking events array
+        status_info = data.get("tracking_status", {}) or {}
+        history = data.get("tracking_history", []) or []
 
-        if not events:
-            return {"status": "No update yet", "delivered": False, "usps_scanned": False, "raw": "No update yet"}
+        status = status_info.get("status", "") or ""
+        status_detail = status_info.get("status_details", "") or ""
+        location_obj = status_info.get("location") or {}
+        location = ""
+        if location_obj:
+            city = location_obj.get("city", "")
+            state = location_obj.get("state", "")
+            if city and state:
+                location = f"{city}, {state}"
+            elif city:
+                location = city
 
-        # Latest event is first in the array
-        latest = events[0]
-        status = latest.get("z", "") or latest.get("c", "")
-        location = latest.get("l", "")
-        time_str = latest.get("a", "")
-        raw = f"{status}"
+        raw = status_detail or status
         if location:
             raw += f" — {location}"
-        if time_str:
-            raw += f" ({time_str[:10]})"
 
-        # Check delivery status
-        track_state = track_info.get("w1", {})
-        package_status = str(track_state.get("package_status", "")).lower()
-        delivered = "delivered" in package_status or "delivered" in status.lower()
-        usps_scanned = len(events) > 0 and "pre-shipment" not in status.lower() and status != ""
+        delivered = status.upper() == "DELIVERED"
+        usps_scanned = status.upper() not in ("", "PRE_TRANSIT", "UNKNOWN") and bool(history)
 
-        logger.info("17track status for %s: %s", tracking_number, raw)
         return {
-            "status": status or "In transit",
+            "status": status_detail or status or "No update yet",
             "delivered": delivered,
             "usps_scanned": usps_scanned,
-            "raw": raw,
+            "raw": raw or "No update yet",
         }
 
     except Exception as exc:
-        logger.error("17track error for %s: %s", tracking_number, exc)
+        logger.error("Shippo tracking error for %s: %s", tracking_number, exc)
         return {"status": "Could not fetch status", "delivered": False, "usps_scanned": False, "raw": "Could not fetch status"}
 
 
