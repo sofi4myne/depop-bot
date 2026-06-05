@@ -297,8 +297,7 @@ def get_tracking_status(tracking_number: str) -> dict:
             timeout=15,
         )
         data = resp.json()
-
-        # Navigate the response
+        logger.info("17track raw response for %s: %s", tracking_number, data)
         accepted = data.get("data", {}).get("accepted", [])
         if not accepted:
             logger.warning("17track no accepted data for %s: %s", tracking_number, data)
